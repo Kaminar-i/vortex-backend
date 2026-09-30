@@ -1,8 +1,5 @@
-import { InMemoryIntentsRepository, isVersionConflict } from "./intents.repository";
+import { InMemoryIntentsRepository } from "./intents.repository";
 import { Intent } from "./intents.types";
-import { runIntentsRepositoryContract } from "./intents-repository.contract";
-
-runIntentsRepositoryContract("in-memory", () => new InMemoryIntentsRepository({ seed: false }));
 
 /** Minimal helper that builds a valid Intent for test cases. */
 function makeIntent(overrides: Partial<Intent> = {}): Intent {
@@ -18,8 +15,6 @@ function makeIntent(overrides: Partial<Intent> = {}): Intent {
     state: "open",
     createdAt: now,
     deadline: now + 1800,
-    version: 0,
-    srcVerified: true,
     ...overrides,
   };
 }
@@ -35,10 +30,6 @@ describe("InMemoryIntentsRepository", () => {
 
   it("seeds 5 intents on construction", () => {
     expect(repo.findAll()).toHaveLength(5);
-  });
-
-  it("skips seeding when seed: false (dual-write mode)", () => {
-    expect(new InMemoryIntentsRepository({ seed: false }).findAll()).toHaveLength(0);
   });
 
   // ── save ──────────────────────────────────────────────────────────────────
@@ -121,11 +112,10 @@ describe("InMemoryIntentsRepository", () => {
   it("update applies patch and returns the updated intent", () => {
     repo.save(makeIntent({ intentId: "upd-1", state: "open" }));
 
-    const updated = repo.update("upd-1", { state: "accepted", solver: "SOLVER_X" }, 0);
-    if (!updated || isVersionConflict(updated)) throw new Error("expected an intent");
+    const updated = repo.update("upd-1", { state: "accepted", solver: "SOLVER_X" });
 
-    expect(updated.state).toBe("accepted");
-    expect(updated.solver).toBe("SOLVER_X");
+    expect(updated?.state).toBe("accepted");
+    expect(updated?.solver).toBe("SOLVER_X");
     expect(repo.findById("upd-1")?.state).toBe("accepted");
   });
 
@@ -133,12 +123,12 @@ describe("InMemoryIntentsRepository", () => {
     const intent = makeIntent({ intentId: "upd-2", srcAmount: "999" });
     repo.save(intent);
 
-    repo.update("upd-2", { state: "cancelled" }, 0);
+    repo.update("upd-2", { state: "cancelled" });
 
     expect(repo.findById("upd-2")?.srcAmount).toBe("999");
   });
 
   it("update returns null for a missing id", () => {
-    expect(repo.update("nope", { state: "cancelled" }, 0)).toBeNull();
+    expect(repo.update("nope", { state: "cancelled" })).toBeNull();
   });
 });
