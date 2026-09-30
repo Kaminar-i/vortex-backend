@@ -106,6 +106,18 @@ export function buildCancelMessage(intentId: string, context?: IntentSignatureCo
 }
 
 /**
+ * Build the canonical message that an intent owner must sign to amend it.
+ */
+export function buildAmendMessage(
+  intentId: string,
+  user: string,
+  minDstAmount: string,
+  deadline: number,
+): string {
+  return `amend:${intentId}:${user}:${minDstAmount}:${deadline}`;
+}
+
+/**
  * Build the canonical message that a solver must sign to authenticate its WS connection.
  */
 export function buildWsAuthMessage(solver: string, timestamp: number | string): string {

@@ -131,4 +131,32 @@ describe("InMemoryIntentsRepository", () => {
   it("update returns null for a missing id", () => {
     expect(repo.update("nope", { state: "cancelled" })).toBeNull();
   });
+
+  it("amendIfOpen updates both terms without changing intent identity or creation history", () => {
+    const now = Math.floor(Date.now() / 1000);
+    const original = makeIntent({ intentId: "amend-1", createdAt: now - 10, deadline: now + 100 });
+    repo.save(original);
+
+    const amended = repo.amendIfOpen("amend-1", { minDstAmount: "980000", deadline: now + 200 }, now);
+
+    expect(amended).toMatchObject({
+      intentId: original.intentId,
+      createdAt: original.createdAt,
+      state: "open",
+      minDstAmount: "980000",
+      deadline: now + 200,
+    });
+  });
+
+  it("amendIfOpen refuses a non-open or expired intent", () => {
+    const now = Math.floor(Date.now() / 1000);
+    repo.save(makeIntent({ intentId: "accepted", state: "accepted", deadline: now + 100 }));
+    repo.save(makeIntent({ intentId: "expired", deadline: now - 1 }));
+
+    expect(repo.amendIfOpen("accepted", { minDstAmount: "1", deadline: now + 200 }, now)).toBeNull();
+    expect(repo.amendIfOpen("expired", { minDstAmount: "1", deadline: now + 200 }, now)).toBeNull();
+    expect(repo.amendIfOpen("missing", { minDstAmount: "1", deadline: now + 200 }, now)).toBeNull();
+  });
+});
+  });
 });
