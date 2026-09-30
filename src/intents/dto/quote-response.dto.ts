@@ -1,4 +1,4 @@
-import { ApiProperty } from "@nestjs/swagger";
+import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 import { TokenInfo } from "../intents.types";
 
 export class RouteStepDto {
@@ -100,4 +100,7 @@ export class QuoteResponseDto {
 
   @ApiProperty({ description: "Price impact for the best quote as a decimal fraction (0 when no quote available)" })
   priceImpact!: number;
+
+  @ApiPropertyOptional({ description: "True when no solver responded and the returned quote is indicative" })
+  indicative?: boolean;
 }
