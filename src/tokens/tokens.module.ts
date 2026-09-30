@@ -65,6 +65,9 @@ import { TokenVerifierService } from "./verification/token-verifier.service";
     TokenVerifierService,
     AdminTokensService,
     TokensService,
+    PriceFeedWorker,
+    CoinGeckoPriceFeedProvider,
+    { provide: PRICE_FEED_PROVIDER, useExisting: CoinGeckoPriceFeedProvider },
   ],
   exports: [TokensService, TokenListPublisher],
 })
