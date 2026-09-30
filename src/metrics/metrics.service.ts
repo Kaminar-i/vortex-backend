@@ -94,7 +94,7 @@ export class MetricsService implements OnModuleInit {
     this.httpRequestDuration = new client.Histogram({
       name: `${prefix}http_request_duration_seconds`,
       help: "HTTP request duration in seconds",
-      labelNames: ["method", "route", "status_code"],
+      labelNames: ["method", "route", "status_code", "version"],
       buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
       registers: [this.register],
     });
@@ -102,14 +102,14 @@ export class MetricsService implements OnModuleInit {
     this.httpRequestTotal = new client.Counter({
       name: `${prefix}http_requests_total`,
       help: "Total number of HTTP requests",
-      labelNames: ["method", "route", "status_code"],
+      labelNames: ["method", "route", "status_code", "version"],
       registers: [this.register],
     });
 
     this.httpRequestErrors = new client.Counter({
       name: `${prefix}http_request_errors_total`,
       help: "Total number of HTTP request errors (5xx)",
-      labelNames: ["method", "route", "status_code"],
+      labelNames: ["method", "route", "status_code", "version"],
       registers: [this.register],
     });
 

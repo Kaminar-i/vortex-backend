@@ -10,6 +10,12 @@ import { AppConfig } from "../../src/config/configuration";
 import { HttpExceptionFilter } from "../../src/common/http-exception.filter";
 import { PrismaService } from "../../src/prisma/prisma.service";
 import { BODY_SIZE_LIMIT, JSON_MAX_DEPTH } from "../../src/config/limits.config";
+import {
+  API_VERSIONS,
+  createApiDeprecationHeadersMiddleware,
+  enableApiVersioning,
+  openApiDocumentForVersion,
+} from "../../src/common/api-versioning";
 
 /**
  * Minimal PrismaService stand-in for e2e tests.
@@ -39,6 +45,8 @@ export async function createTestApp(): Promise<INestApplication> {
     .compile();
 
   const app = moduleRef.createNestApplication();
+  enableApiVersioning(app);
+  app.use(createApiDeprecationHeadersMiddleware());
 
   // Mirror the production body-size limit so 413 tests behave correctly
   app.use(json({ limit: BODY_SIZE_LIMIT }));
@@ -88,11 +96,16 @@ export async function createTestApp(): Promise<INestApplication> {
     .setDescription("Intent relay API + WebSocket feed for Vortex Protocol")
     .setVersion("0.1.0")
     .build();
-  SwaggerModule.setup(
-    "docs",
-    app,
-    SwaggerModule.createDocument(app, swaggerConfig),
-  );
+  const allVersionsDocument = SwaggerModule.createDocument(app, swaggerConfig);
+  SwaggerModule.setup("docs", app, allVersionsDocument);
+  for (const version of API_VERSIONS) {
+    SwaggerModule.setup(
+      `docs/v${version}`,
+      app,
+      openApiDocumentForVersion(allVersionsDocument, version),
+      { jsonDocumentUrl: `docs/v${version}-json` },
+    );
+  }
 
   // Wire CORS the same way main.ts does so the e2e environment is faithful.
   const configService = app.get(ConfigService<AppConfig, true>);

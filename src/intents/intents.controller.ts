@@ -74,7 +74,7 @@ import { AppConfig } from "../config/configuration";
 import { isCanaryIntent } from "../common/canary";
 
 @ApiTags("intents")
-@Controller("api/v1/intents")
+@Controller({ path: "intents", version: "1" })
 export class IntentsController {
   constructor(
     private readonly intentsService: IntentsService,

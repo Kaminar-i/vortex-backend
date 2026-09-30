@@ -60,4 +60,11 @@ describe("MetricsController (e2e)", () => {
       expect(res.text).toContain("vortex_process_cpu_seconds");
     });
   });
+
+  it("labels HTTP request metrics with the routed API version", async () => {
+    await request(app.getHttpServer()).get("/api/v1/stats").expect(200);
+    const res = await request(app.getHttpServer()).get("/metrics").expect(200);
+
+    expect(res.text).toContain('version="v1"');
+  });
 });
