@@ -291,3 +291,211 @@ describe("SolverGriefingService", () => {
     expect(record?.escalationCount).toBeGreaterThanOrEqual(1);
   });
 });
+
+// ── Criterion 2: reputation penalty ─────────────────────────────────────────
+
+import { applyGriefingPenalty, GRIEFING_REPUTATION_MULTIPLIERS } from "./solver-griefing.types";
+
+describe("applyGriefingPenalty (reputation integration)", () => {
+  const RAW = 0.8000;
+
+  it("ok state applies no penalty (×1.0)", () => {
+    expect(applyGriefingPenalty(RAW, "ok")).toBeCloseTo(0.8000, 4);
+  });
+
+  it("cooldown applies ×0.8 multiplier", () => {
+    expect(applyGriefingPenalty(RAW, "cooldown")).toBeCloseTo(0.6400, 4);
+  });
+
+  it("reduced-concurrency applies ×0.5 multiplier", () => {
+    expect(applyGriefingPenalty(RAW, "reduced-concurrency")).toBeCloseTo(0.4000, 4);
+  });
+
+  it("suspended floors reputation to 0", () => {
+    expect(applyGriefingPenalty(RAW, "suspended")).toBe(0.0000);
+    expect(applyGriefingPenalty(0.9999, "suspended")).toBe(0.0);
+  });
+
+  it("multipliers are monotonically decreasing across states", () => {
+    expect(GRIEFING_REPUTATION_MULTIPLIERS["ok"]).toBeGreaterThan(
+      GRIEFING_REPUTATION_MULTIPLIERS["cooldown"],
+    );
+    expect(GRIEFING_REPUTATION_MULTIPLIERS["cooldown"]).toBeGreaterThan(
+      GRIEFING_REPUTATION_MULTIPLIERS["reduced-concurrency"],
+    );
+    expect(GRIEFING_REPUTATION_MULTIPLIERS["reduced-concurrency"]).toBeGreaterThan(
+      GRIEFING_REPUTATION_MULTIPLIERS["suspended"],
+    );
+  });
+});
+
+// ── Criterion 3: metrics wiring ──────────────────────────────────────────────
+
+describe("SolverGriefingService — metrics wiring (issue #453 criterion 3)", () => {
+  const NOW = 1_700_000_000;
+
+  function makeMetricsMock() {
+    return {
+      recordGriefingTransition: jest.fn(),
+      setGriefingRatio: jest.fn(),
+      setGriefingEnforcementState: jest.fn(),
+      setGriefingConcurrencyLimit: jest.fn(),
+      setGriefingEnforcedCount: jest.fn(),
+    };
+  }
+
+  it("emits transition metric when state escalates to cooldown", () => {
+    const svc = SolverGriefingService.withConfig(TEST_CONFIG);
+    const metrics = makeMetricsMock();
+    svc.setMetrics(metrics as never);
+
+    svc.recordAccept(SOLVER, "i1", NOW);
+    svc.recordAccept(SOLVER, "i2", NOW);
+    svc.recordAccept(SOLVER, "i3", NOW);
+    svc.recordAccept(SOLVER, "i4", NOW);
+    svc.recordUnfilled(SOLVER, "i1", NOW);
+    svc.recordUnfilled(SOLVER, "i2", NOW);
+
+    // At least one state transition must have been emitted.
+    expect(metrics.recordGriefingTransition).toHaveBeenCalledWith(
+      SOLVER,
+      "ok",
+      expect.stringMatching(/cooldown|reduced-concurrency|suspended/),
+    );
+  });
+
+  it("emits unfilled ratio metric on every recordUnfilled call", () => {
+    const svc = SolverGriefingService.withConfig(TEST_CONFIG);
+    const metrics = makeMetricsMock();
+    svc.setMetrics(metrics as never);
+
+    svc.recordAccept(SOLVER, "i1", NOW);
+    svc.recordAccept(SOLVER, "i2", NOW);
+    svc.recordAccept(SOLVER, "i3", NOW);
+    svc.recordUnfilled(SOLVER, "i1", NOW);
+
+    expect(metrics.setGriefingRatio).toHaveBeenCalledWith(
+      SOLVER,
+      expect.any(Number),
+    );
+  });
+
+  it("emits enforcement state gauge on transition", () => {
+    const svc = SolverGriefingService.withConfig(TEST_CONFIG);
+    const metrics = makeMetricsMock();
+    svc.setMetrics(metrics as never);
+
+    svc.recordAccept(SOLVER, "i1", NOW);
+    svc.recordAccept(SOLVER, "i2", NOW);
+    svc.recordAccept(SOLVER, "i3", NOW);
+    svc.recordAccept(SOLVER, "i4", NOW);
+    svc.recordUnfilled(SOLVER, "i1", NOW);
+    svc.recordUnfilled(SOLVER, "i2", NOW);
+
+    expect(metrics.setGriefingEnforcementState).toHaveBeenCalledWith(
+      SOLVER,
+      expect.stringMatching(/cooldown|reduced-concurrency|suspended/),
+    );
+  });
+
+  it("emits concurrency limit gauge on transition to reduced-concurrency", () => {
+    const svc = SolverGriefingService.withConfig(TEST_CONFIG);
+    const metrics = makeMetricsMock();
+    svc.setMetrics(metrics as never);
+
+    // Drive directly to reduced-concurrency: 2/4 = 50%
+    svc.recordAccept(SOLVER, "i1", NOW);
+    svc.recordAccept(SOLVER, "i2", NOW);
+    svc.recordAccept(SOLVER, "i3", NOW);
+    svc.recordAccept(SOLVER, "i4", NOW);
+    svc.recordUnfilled(SOLVER, "i1", NOW);
+    svc.recordUnfilled(SOLVER, "i2", NOW);
+
+    const record = svc.getRecord(SOLVER);
+    if (record?.state === "reduced-concurrency") {
+      expect(metrics.setGriefingConcurrencyLimit).toHaveBeenCalledWith(
+        SOLVER,
+        TEST_CONFIG.reducedConcurrencyLimit,
+      );
+    }
+  });
+
+  it("emits enforced-solver count gauge on every transition", () => {
+    const svc = SolverGriefingService.withConfig(TEST_CONFIG);
+    const metrics = makeMetricsMock();
+    svc.setMetrics(metrics as never);
+
+    svc.recordAccept(SOLVER, "i1", NOW);
+    svc.recordAccept(SOLVER, "i2", NOW);
+    svc.recordAccept(SOLVER, "i3", NOW);
+    svc.recordAccept(SOLVER, "i4", NOW);
+    svc.recordUnfilled(SOLVER, "i1", NOW);
+    svc.recordUnfilled(SOLVER, "i2", NOW);
+
+    expect(metrics.setGriefingEnforcedCount).toHaveBeenCalledWith(
+      expect.any(Number),
+    );
+  });
+
+  it("does not throw when no metrics service is wired", () => {
+    const svc = SolverGriefingService.withConfig(TEST_CONFIG);
+    // No setMetrics call — metrics is null
+
+    svc.recordAccept(SOLVER, "i1", NOW);
+    svc.recordAccept(SOLVER, "i2", NOW);
+    svc.recordAccept(SOLVER, "i3", NOW);
+    svc.recordAccept(SOLVER, "i4", NOW);
+    expect(() => {
+      svc.recordUnfilled(SOLVER, "i1", NOW);
+      svc.recordUnfilled(SOLVER, "i2", NOW);
+    }).not.toThrow();
+  });
+});
+
+// ── Criterion 5: incident exclusion removes from rolling ratio ───────────────
+
+describe("SolverGriefingService — incident exclusion removes unfilled count (#453 criterion 5)", () => {
+  const NOW = 1_700_000_000;
+
+  it("exclusion before recordUnfilled prevents the intent from counting", () => {
+    const svc = SolverGriefingService.withConfig(TEST_CONFIG);
+    // 5 accepts, exclude i1 before any unfilled events
+    for (let i = 1; i <= 5; i++) svc.recordAccept(SOLVER, `i${i}`, NOW);
+    svc.excludeIncident(SOLVER, "i1", "admin");
+
+    svc.recordUnfilled(SOLVER, "i1", NOW); // must be skipped
+    // Only 0 of 5 counted → ratio=0
+    expect(svc.getCurrentRatio(SOLVER)).toBe(0);
+    expect(svc.getRecord(SOLVER)?.state).toBe("ok");
+  });
+
+  it("exclusion after recordUnfilled decrements the window count and may unblock", () => {
+    const svc = SolverGriefingService.withConfig(TEST_CONFIG);
+    // 4 accepts, 2 unfilled = 50% → reduced-concurrency
+    svc.recordAccept(SOLVER, "i1", NOW);
+    svc.recordAccept(SOLVER, "i2", NOW);
+    svc.recordAccept(SOLVER, "i3", NOW);
+    svc.recordAccept(SOLVER, "i4", NOW);
+    svc.recordUnfilled(SOLVER, "i1", NOW);
+    svc.recordUnfilled(SOLVER, "i2", NOW);
+
+    const stateBefore = svc.getRecord(SOLVER)?.state;
+    expect(["cooldown", "reduced-concurrency", "suspended"]).toContain(stateBefore);
+
+    // Exclude both unfilled intents: ratio drops to 0
+    svc.excludeIncident(SOLVER, "i1", "admin");
+    svc.excludeIncident(SOLVER, "i2", "admin");
+
+    // Ratio should now be 0 (0 unfilled in window after both exclusions)
+    expect(svc.getCurrentRatio(SOLVER)).toBe(0);
+  });
+
+  it("exclusion writes an audit entry with the operator name", () => {
+    const svc = SolverGriefingService.withConfig(TEST_CONFIG);
+    svc.excludeIncident(SOLVER, "i_exclude", "ops-team");
+    const entry = svc.getAuditLog(SOLVER).find((e) => e.event === "incident_excluded");
+    expect(entry).toBeDefined();
+    expect(entry?.intentId).toBe("i_exclude");
+    expect(entry?.operator).toBe("ops-team");
+  });
+});

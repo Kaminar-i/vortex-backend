@@ -3,10 +3,10 @@ import {
   GriefingAuditEntry,
   GriefingConfig,
   GriefingState,
-  GriefingWindow,
   SolverGriefingRecord,
   loadGriefingConfig,
 } from "./solver-griefing.types";
+import type { MetricsService } from "../metrics/metrics.service";
 
 /**
  * Anti-griefing service for solvers (issue #453).
@@ -39,8 +39,24 @@ export class SolverGriefingService {
   private readonly auditLog: GriefingAuditEntry[] = [];
   readonly config: GriefingConfig;
 
+  /**
+   * Optional MetricsService reference — set after construction via
+   * {@link setMetrics}.  Kept optional so unit tests don't need the full
+   * metrics stack, and so the service can be constructed before
+   * MetricsModule is fully initialised (circular-ref safety).
+   */
+  private metrics: MetricsService | null = null;
+
   constructor() {
     this.config = loadGriefingConfig();
+  }
+
+  /**
+   * Wire in the MetricsService after construction.
+   * Called from SolversModule once both providers are ready.
+   */
+  setMetrics(metrics: MetricsService): void {
+    this.metrics = metrics;
   }
 
   /**
@@ -179,6 +195,15 @@ export class SolverGriefingService {
       `[griefing] unfilled recorded solver=${solverAddress} intent=${intentId} ratio=${ratio.toFixed(2)} state=${record.state}`,
     );
 
+    // Push ratio metric immediately so per-scrape staleness is bounded.
+    if (this.metrics) {
+      try {
+        this.metrics.setGriefingRatio(solverAddress, ratio);
+      } catch (err) {
+        this.logger.error(`[griefing] ratio metric emit failed: ${(err as Error).message}`);
+      }
+    }
+
     this.evaluateAndEscalate(record, ratio, now);
   }
 
@@ -310,7 +335,7 @@ export class SolverGriefingService {
 
   // ── Private helpers ───────────────────────────────────────────────────────
 
-  private getOrCreate(solverAddress: string, now: number): SolverGriefingRecord {
+  private getOrCreate(solverAddress: string, _now: number): SolverGriefingRecord {
     let record = this.records.get(solverAddress);
     if (!record) {
       record = {
@@ -410,6 +435,8 @@ export class SolverGriefingService {
 
   /**
    * Apply a state transition, update bookkeeping, and write an audit entry.
+   * Also emits Prometheus metrics for the transition and the new per-solver
+   * enforcement state.
    */
   private transitionState(
     record: SolverGriefingRecord,
@@ -454,6 +481,26 @@ export class SolverGriefingService {
     this.logger.warn(
       `[griefing] state_changed solver=${record.solverAddress} ${fromState}→${toState} reason="${reason}"`,
     );
+
+    // ── Metrics ──────────────────────────────────────────────────────────────
+    if (this.metrics) {
+      try {
+        // Transition counter with solver label.
+        this.metrics.recordGriefingTransition(record.solverAddress, fromState, toState);
+        // Per-solver gauges: enforcement state (as numeric), concurrency limit.
+        this.metrics.setGriefingEnforcementState(record.solverAddress, toState);
+        this.metrics.setGriefingConcurrencyLimit(
+          record.solverAddress,
+          record.concurrencyLimit ?? 0,
+        );
+        // Update the aggregate enforced-solver count.
+        this.metrics.setGriefingEnforcedCount(
+          [...this.records.values()].filter((r) => r.state !== "ok").length,
+        );
+      } catch (err) {
+        this.logger.error(`[griefing] metrics emit failed: ${(err as Error).message}`);
+      }
+    }
   }
 
   private appendAudit(entry: GriefingAuditEntry): void {

@@ -167,3 +167,37 @@ export function loadGriefingConfig(): GriefingConfig {
     reducedConcurrencyLimit: num("GRIEFING_REDUCED_CONCURRENCY_LIMIT", DEFAULT_GRIEFING_CONFIG.reducedConcurrencyLimit),
   };
 }
+
+// ── Reputation integration (issue #453 criterion 2) ──────────────────────────
+
+/**
+ * Griefing penalty multipliers applied to the existing `reputationScore`
+ * formula (`successRate × exp(-ageDays/180)`).
+ *
+ * The multiplier degrades the score monotonically with enforcement severity
+ * so that a suspended solver ranks below any active solver regardless of its
+ * historical fill rate. Values are defined once here so every consumer
+ * (leaderboard, stats, future analytics) stays in sync.
+ *
+ *   ok                  → ×1.00  (no degradation)
+ *   cooldown            → ×0.80  (mild; recovers automatically on expiry)
+ *   reduced-concurrency → ×0.50  (material; solver has repeated violations)
+ *   suspended           → ×0.00  (floor; suspended solvers always rank last)
+ */
+export const GRIEFING_REPUTATION_MULTIPLIERS: Record<GriefingState, number> = {
+  ok: 1.0,
+  cooldown: 0.8,
+  "reduced-concurrency": 0.5,
+  suspended: 0.0,
+};
+
+/**
+ * Apply the griefing penalty multiplier to a raw reputation score.
+ *
+ * @param rawScore  Pre-penalty reputation score (successRate × age decay).
+ * @param state     The solver's current griefing enforcement state.
+ * @returns         Penalised reputation score, rounded to 4 decimal places.
+ */
+export function applyGriefingPenalty(rawScore: number, state: GriefingState): number {
+  return Number((rawScore * GRIEFING_REPUTATION_MULTIPLIERS[state]).toFixed(4));
+}

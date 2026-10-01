@@ -1,4 +1,4 @@
-import { Module, forwardRef } from "@nestjs/common";
+import { Module, OnModuleInit, forwardRef } from "@nestjs/common";
 import { SolversController } from "./solvers.controller";
 import { SolversService } from "./solvers.service";
 import { SOLVERS_REPOSITORY } from "./solvers.repository";
@@ -8,6 +8,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import { IntentsModule } from "../intents/intents.module";
 import { SolverGriefingService } from "./solver-griefing.service";
 import { SolverGriefingController } from "./solver-griefing.controller";
+import { MetricsService } from "../metrics/metrics.service";
 
 @Module({
   imports: [forwardRef(() => IntentsModule)],
@@ -31,4 +32,19 @@ import { SolverGriefingController } from "./solver-griefing.controller";
   ],
   exports: [SolversService, SolverGriefingService],
 })
-export class SolversModule {}
+export class SolversModule implements OnModuleInit {
+  constructor(
+    private readonly griefingService: SolverGriefingService,
+    private readonly metricsService: MetricsService,
+  ) {}
+
+  /**
+   * Wire MetricsService into SolverGriefingService after both providers are
+   * initialised.  MetricsModule is @Global() so it is always available; we
+   * inject it here rather than in SolverGriefingService's constructor to avoid
+   * a circular-module dependency (Metrics → Solvers → Metrics).
+   */
+  onModuleInit(): void {
+    this.griefingService.setMetrics(this.metricsService);
+  }
+}

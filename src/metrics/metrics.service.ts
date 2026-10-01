@@ -104,6 +104,18 @@ export class MetricsService implements OnModuleInit {
    * the "ok" state.
    */
   public readonly griefingEnforcedSolvers: client.Gauge<string>;
+  /**
+   * `vortex_griefing_enforcement_state{solver,state}` — current enforcement
+   * state as a 0/1 gauge per (solver, state) label pair.  Allows dashboards and
+   * alerts to query "how many solvers are suspended right now" with a simple
+   * `sum(vortex_griefing_enforcement_state{state="suspended"})`.
+   */
+  public readonly griefingEnforcementState: client.Gauge<string>;
+  /**
+   * `vortex_griefing_concurrency_limit{solver}` — effective concurrent-accept
+   * cap while in "reduced-concurrency" state; 0 when no limit is active.
+   */
+  public readonly griefingConcurrencyLimit: client.Gauge<string>;
 
   constructor(private readonly configService: ConfigService<AppConfig, true>) {
     this.register = new client.Registry();
@@ -252,6 +264,20 @@ export class MetricsService implements OnModuleInit {
     this.griefingEnforcedSolvers = new client.Gauge({
       name: `${prefix}griefing_enforced_solvers`,
       help: "Number of solvers currently under anti-griefing enforcement (not in ok state)",
+      registers: [this.register],
+    });
+
+    this.griefingEnforcementState = new client.Gauge({
+      name: `${prefix}griefing_enforcement_state`,
+      help: "1 when the solver is currently in the given enforcement state, 0 otherwise",
+      labelNames: ["solver", "state"],
+      registers: [this.register],
+    });
+
+    this.griefingConcurrencyLimit = new client.Gauge({
+      name: `${prefix}griefing_concurrency_limit`,
+      help: "Effective concurrent-accept cap per solver while in reduced-concurrency (0 = unlimited)",
+      labelNames: ["solver"],
       registers: [this.register],
     });
 
@@ -467,6 +493,27 @@ export class MetricsService implements OnModuleInit {
   /** Set the count of solvers currently under enforcement. */
   setGriefingEnforcedCount(count: number): void {
     this.griefingEnforcedSolvers.set(count);
+  }
+
+  /**
+   * Update per-solver enforcement state gauges.
+   *
+   * Sets the named state label to 1 and all other enforcement states to 0
+   * so dashboards can query `{state="suspended"}` without stale series.
+   */
+  setGriefingEnforcementState(solverAddress: string, state: string): void {
+    const s = solverAddress.slice(0, 12);
+    for (const st of ["ok", "cooldown", "reduced-concurrency", "suspended"]) {
+      this.griefingEnforcementState.set({ solver: s, state: st }, st === state ? 1 : 0);
+    }
+  }
+
+  /**
+   * Update the effective concurrency cap for a solver.
+   * Pass 0 when no limit is active (state is not "reduced-concurrency").
+   */
+  setGriefingConcurrencyLimit(solverAddress: string, limit: number): void {
+    this.griefingConcurrencyLimit.set({ solver: solverAddress.slice(0, 12) }, limit);
   }
 
   /**

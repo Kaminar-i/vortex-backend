@@ -5,6 +5,7 @@ import {
   ForbiddenException,
   Get,
   NotFoundException,
+  Optional,
   Param,
   Patch,
   Post,
@@ -26,6 +27,8 @@ import {
   verifyStellarSignature,
 } from "../common/stellar-signature";
 import { SolversService, LeaderboardWindow } from "./solvers.service";
+import { SolverGriefingService } from "./solver-griefing.service";
+import { applyGriefingPenalty } from "./solver-griefing.types";
 import { ListIntentsDto } from "../intents/dto/list-intents.dto";
 import { AppConfig } from "../config/configuration";
 import { isCanaryIntent } from "../common/canary";
@@ -47,6 +50,7 @@ export class SolversController {
     private readonly solversService: SolversService,
     private readonly intentsService: IntentsService,
     private readonly intentIndex: IntentCapabilityIndex,
+    @Optional() private readonly griefingService: SolverGriefingService | null,
     config: ConfigService<AppConfig, true>,
   ) {
     this.canary = new Set(config.get("canaryAddresses", { infer: true }) ?? []);
@@ -135,9 +139,13 @@ export class SolversController {
         const total = fillsCompleted + fillsFailed;
         const successRate = total > 0 ? fillsCompleted / total : 0;
         const ageDays = Math.max(0, (now - solver.registeredAt) / 86400);
-        const reputationScore = Number(
+        const rawReputation = Number(
           (successRate * Math.exp(-ageDays / 180)).toFixed(4),
         );
+        // Apply griefing penalty: suspended → 0, reduced-concurrency → ×0.5,
+        // cooldown → ×0.8, ok → ×1.0 (issue #453 criterion 2).
+        const griefingState = this.griefingService?.getRecord(solver.address)?.state ?? "ok";
+        const reputationScore = applyGriefingPenalty(rawReputation, griefingState);
 
         return {
           address: solver.address,
@@ -146,6 +154,7 @@ export class SolversController {
           fillsFailed,
           successRate: Number(successRate.toFixed(4)),
           reputationScore,
+          griefingState,
           totalVolume: recentIntents
             .reduce((sum, intent) => sum + BigInt(intent.fillAmount ?? "0"), 0n)
             .toString(),
@@ -226,7 +235,10 @@ export class SolversController {
     const total = fillsCompleted + fillsFailed;
     const successRate = total > 0 ? fillsCompleted / total : 0;
     const ageDays = Math.max(0, (now - solver.registeredAt) / 86400);
-    const reputationScore = Number((successRate * Math.exp(-ageDays / 180)).toFixed(4));
+    const rawReputation = Number((successRate * Math.exp(-ageDays / 180)).toFixed(4));
+    // Apply griefing penalty to reputation score (issue #453 criterion 2).
+    const griefingState = this.griefingService?.getRecord(address)?.state ?? "ok";
+    const reputationScore = applyGriefingPenalty(rawReputation, griefingState);
 
     return {
       address: solver.address,
@@ -235,6 +247,7 @@ export class SolversController {
       fillsFailed,
       successRate: Number(successRate.toFixed(4)),
       reputationScore,
+      griefingState,
       totalVolume: recentIntents
         .filter((intent) => intent.state === "filled")
         .reduce((sum, intent) => sum + BigInt(intent.fillAmount ?? "0"), 0n)
