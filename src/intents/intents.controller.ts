@@ -7,6 +7,7 @@ import {
   Get,
   GoneException,
   NotFoundException,
+  Optional,
   Param,
   Post,
   Query,
@@ -28,6 +29,7 @@ import { Throttle } from "@nestjs/throttler";
 import { IntentsService } from "./intents.service";
 import { IntentsGateway } from "./intents.gateway";
 import { SolversService } from "../solvers/solvers.service";
+import { SolverGriefingService } from "../solvers/solver-griefing.service";
 import { TokensService } from "../tokens/tokens.service";
 import { RoutingService } from "../routing/routing.service";
 import { MAX_OPEN_INTENTS_PER_USER } from "./intents.service";
@@ -72,6 +74,7 @@ export class IntentsController {
   constructor(
     private readonly intentsService: IntentsService,
     private readonly solversService: SolversService,
+    @Optional() private readonly griefingService: SolverGriefingService | null,
     private readonly intentsGateway: IntentsGateway,
     private readonly tokensService: TokensService,
     private readonly routingService: RoutingService,
@@ -369,6 +372,16 @@ export class IntentsController {
     if (this.solversService.isSuspended(dto.solver)) {
       throw new ForbiddenException("Solver is suspended by an active guardian action");
     }
+    // Anti-griefing enforcement (issue #453): check rolling unfilled-accept
+    // ratio before allowing the accept.  Canary solvers are exempt — their
+    // fills are synthetic and must not inflate the enforcement counters.
+    if (!this.canary.has(dto.solver) && this.griefingService) {
+      const currentOpenAccepts = await this.intentsService.getAcceptedCountBySolver(dto.solver);
+      const griefingCheck = this.griefingService.checkAcceptAllowed(dto.solver, currentOpenAccepts, now);
+      if (!griefingCheck.allowed) {
+        throw new ForbiddenException(griefingCheck.reason ?? "Solver is blocked by anti-griefing controls");
+      }
+    }
     // Canary intents pair only with canary solvers (issue #496) so synthetic
     // traffic never affects real solvers' stats or real users' fills.
     if (isCanaryIntent(intent, this.canary) !== this.canary.has(dto.solver)) {
@@ -388,6 +401,10 @@ export class IntentsController {
     this.intentsService.appendAuditEntry(id, "accepted", dto.solver, "solver accepted", {
       deadline: updated.deadline,
     });
+    // Anti-griefing: record the accept in the rolling window (issue #453).
+    if (!this.canary.has(dto.solver) && this.griefingService) {
+      this.griefingService.recordAccept(dto.solver, id, now);
+    }
     this.intentsGateway.broadcast({
       type: "intent_accepted",
       intentId: id,

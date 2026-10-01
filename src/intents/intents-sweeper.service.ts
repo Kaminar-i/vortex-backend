@@ -1,7 +1,8 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
+import { Injectable, Logger, OnModuleDestroy, OnModuleInit, Optional } from "@nestjs/common";
 import { IntentsService } from "./intents.service";
 import { IntentsGateway } from "./intents.gateway";
 import { SolversService } from "../solvers/solvers.service";
+import { SolverGriefingService } from "../solvers/solver-griefing.service";
 import { SolverRegistryService } from "../soroban/solver-registry.service";
 import { logger } from "../common/logger";
 import { MetricsService } from "../metrics/metrics.service";
@@ -34,6 +35,7 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
     private readonly intentsService: IntentsService,
     private readonly intentsGateway: IntentsGateway,
     private readonly solversService: SolversService,
+    @Optional() private readonly griefingService: SolverGriefingService | null,
     private readonly solverRegistryService: SolverRegistryService,
     private readonly metricsService: MetricsService,
     private readonly killSwitch: KillSwitchService,
@@ -226,6 +228,12 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
 
     await this.solversService.recordFailedFill(solver, intentId);
     const slashRecord = await this.solversService.recordSlash(solver, intentId, reason, now);
+
+    // Anti-griefing: record the unfilled accept so the rolling ratio is updated
+    // and enforcement can escalate if this is a repeated offence (issue #453).
+    if (this.griefingService) {
+      this.griefingService.recordUnfilled(solver, intentId, now);
+    }
 
     const result = await this.solverRegistryService.slashSolver({
       solverAddress: solver,

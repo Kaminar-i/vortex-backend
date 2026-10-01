@@ -87,6 +87,24 @@ export class MetricsService implements OnModuleInit {
   // ── Solver-registry event ingestion (issue #399) ──────────────────────────
   public readonly solverRegistryEventsTotal: client.Counter<string>;
 
+  // ── Anti-griefing controls (issue #453) ──────────────────────────────────
+  /**
+   * `vortex_griefing_state_transitions_total{solver,from_state,to_state}` — counts
+   * every enforcement escalation/recovery for a solver.  Solver label is
+   * truncated to 12 chars to bound cardinality.
+   */
+  public readonly griefingStateTransitionsTotal: client.Counter<string>;
+  /**
+   * `vortex_griefing_unfilled_ratio{solver}` — current rolling unfilled/accept
+   * ratio per solver under enforcement (Gauge, updated on each unfilled event).
+   */
+  public readonly griefingUnfilledRatio: client.Gauge<string>;
+  /**
+   * `vortex_griefing_enforced_solvers` — number of solvers currently NOT in
+   * the "ok" state.
+   */
+  public readonly griefingEnforcedSolvers: client.Gauge<string>;
+
   constructor(private readonly configService: ConfigService<AppConfig, true>) {
     this.register = new client.Registry();
     const prefix = "vortex_";
@@ -213,6 +231,27 @@ export class MetricsService implements OnModuleInit {
       name: `${prefix}solver_registry_events_total`,
       help: "Solver-registry contract events ingested by type",
       labelNames: ["event_type"],
+      registers: [this.register],
+    });
+
+    // ── Anti-griefing controls (issue #453) ────────────────────────────────
+    this.griefingStateTransitionsTotal = new client.Counter({
+      name: `${prefix}griefing_state_transitions_total`,
+      help: "Anti-griefing enforcement state machine transitions per solver",
+      labelNames: ["solver", "from_state", "to_state"],
+      registers: [this.register],
+    });
+
+    this.griefingUnfilledRatio = new client.Gauge({
+      name: `${prefix}griefing_unfilled_ratio`,
+      help: "Current rolling unfilled-accept ratio for solvers under enforcement",
+      labelNames: ["solver"],
+      registers: [this.register],
+    });
+
+    this.griefingEnforcedSolvers = new client.Gauge({
+      name: `${prefix}griefing_enforced_solvers`,
+      help: "Number of solvers currently under anti-griefing enforcement (not in ok state)",
       registers: [this.register],
     });
 
@@ -407,6 +446,27 @@ export class MetricsService implements OnModuleInit {
 
   incSolverRegistryEvent(eventType: string): void {
     this.solverRegistryEventsTotal.inc({ event_type: eventType });
+  }
+
+  // ── Anti-griefing helpers (issue #453) ────────────────────────────────────
+
+  /** Record one anti-griefing enforcement state-machine transition. */
+  recordGriefingTransition(solverAddress: string, fromState: string, toState: string): void {
+    this.griefingStateTransitionsTotal.inc({
+      solver: solverAddress.slice(0, 12),
+      from_state: fromState,
+      to_state: toState,
+    });
+  }
+
+  /** Update the rolling unfilled-accept ratio for a solver under enforcement. */
+  setGriefingRatio(solverAddress: string, ratio: number): void {
+    this.griefingUnfilledRatio.set({ solver: solverAddress.slice(0, 12) }, ratio);
+  }
+
+  /** Set the count of solvers currently under enforcement. */
+  setGriefingEnforcedCount(count: number): void {
+    this.griefingEnforcedSolvers.set(count);
   }
 
   /**
