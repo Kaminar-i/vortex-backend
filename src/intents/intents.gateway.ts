@@ -1,4 +1,4 @@
-﻿import { OnModuleDestroy, Optional } from "@nestjs/common";
+﻿import { OnModuleDestroy, Optional, Inject } from "@nestjs/common";
 import { OnGatewayConnection, OnGatewayDisconnect, WebSocketGateway } from "@nestjs/websockets";
 import { WebSocket } from "ws";
 import { IntentsService } from "./intents.service";
@@ -18,26 +18,12 @@ import {
   WS_CLOSE_UNSUPPORTED_PROTOCOL,
   WS_CLOSE_REASON_UNSUPPORTED,
 } from "./ws-protocol";
+import { REPLAY_STORE } from "./backplane/replay-store.token";
+import { ReplayStore, SequencedEvent } from "./backplane/replay-store";
+import { MemoryReplayStore } from "./backplane/memory-replay.store";
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
-/**
- * How many sequenced events to keep in the replay buffer.
- *
- * At typical broadcast volume (a few dozen events/minute in production),
- * 500 events covers many minutes of missed events — more than enough to
- * bridge a transient network blip or container restart without forcing a
- * full snapshot re-fetch. Increasing this beyond ~1 000 starts to add
- * non-trivial heap pressure for large event payloads; the current bound
- * is a deliberate memory vs. reconnect-gap tradeoff.
- */
-const REPLAY_BUFFER_SIZE = 500;
-
-export interface SequencedEvent {
-  seq: number;
-  type: string;
-  [key: string]: unknown;
-}
 
 /**
  * Per-subscriber filter (issue #436).
@@ -59,49 +45,6 @@ interface SubscriberFilter {
   wantAll: boolean;
   /** Number of `subscribe` messages this connection has sent. */
   subscriptionCount: number;
-}
-
-/**
- * Fixed-size ring buffer that retains the last `capacity` events so
- * reconnecting clients can request a replay from a known sequence number.
- */
-export class EventRingBuffer {
-  private readonly buf: SequencedEvent[] = [];
-  private readonly capacity: number;
-
-  constructor(capacity = REPLAY_BUFFER_SIZE) {
-    this.capacity = capacity;
-  }
-
-  push(event: SequencedEvent): void {
-    if (this.buf.length >= this.capacity) {
-      this.buf.shift();
-    }
-    this.buf.push(event);
-  }
-
-  /**
-   * Return all buffered events whose seq is strictly greater than `fromSeq`.
-   * Returns an empty array when `fromSeq` is older than the earliest buffered
-   * event (the caller should request a fresh snapshot instead).
-   */
-  since(fromSeq: number): SequencedEvent[] {
-    return this.buf.filter((e) => e.seq > fromSeq);
-  }
-
-  /** Lowest seq still in the buffer, or -1 when empty. */
-  oldestSeq(): number {
-    return this.buf.length === 0 ? -1 : this.buf[0].seq;
-  }
-
-  /** Highest seq in the buffer, or 0 when empty. */
-  latestSeq(): number {
-    return this.buf.length === 0 ? 0 : this.buf[this.buf.length - 1].seq;
-  }
-
-  size(): number {
-    return this.buf.length;
-  }
 }
 
 /**
@@ -154,14 +97,16 @@ export class IntentsGateway
   } = null;
 
   /** Ring buffer storing the last REPLAY_BUFFER_SIZE broadcast events. */
-  private readonly ringBuffer = new EventRingBuffer(REPLAY_BUFFER_SIZE);
+  private replayStore: ReplayStore;
 
   constructor(
     private readonly intentsService: IntentsService,
     private readonly solversService: SolversService,
     private readonly intentIndex: IntentCapabilityIndex,
     @Optional() private readonly metricsService?: MetricsService,
+    @Optional() @Inject(REPLAY_STORE) replayStoreParam: ReplayStore | null = null,
   ) {
+    this.replayStore = replayStoreParam ?? new MemoryReplayStore({ maxCount: 500 });
     this.heartbeatTimer = setInterval(() => this.heartbeat(), HEARTBEAT_INTERVAL_MS);
     this.backplane = this.createBackplane();
     if (this.backplane) {
@@ -330,7 +275,7 @@ export class IntentsGateway
     }
   }
 
-  handleConnection(client: WebSocket) {
+  async handleConnection(client: WebSocket) {
     // ── Protocol version check (issue #456) ────────────────────────────────
     // `client.protocol` is the negotiated subprotocol string from the HTTP
     // upgrade handshake.  Empty string means the client sent no
@@ -372,7 +317,7 @@ export class IntentsGateway
       );
     });
 
-    const currentSeq = this.nextSeq - 1;
+    const currentSeq = await this.replayStore.latestSeq();
 
     client.send(
       JSON.stringify({
@@ -453,7 +398,7 @@ export class IntentsGateway
         this.handleSubscribe(client, msg);
         break;
       case "replay":
-        this.handleReplay(client, msg);
+        await this.handleReplay(client, msg);
         break;
       case "auth":
         await this.handleAuth(client, msg);
@@ -572,7 +517,7 @@ export class IntentsGateway
   /**
    * Process a `{ type: "replay", fromSeq: number }` message.
    */
-  private handleReplay(client: WebSocket, msg: Record<string, unknown>): void {
+  private async handleReplay(client: WebSocket, msg: Record<string, unknown>): Promise<void> {
     const fromSeq = typeof msg.fromSeq === "number" ? msg.fromSeq : null;
     if (fromSeq === null || !Number.isInteger(fromSeq) || fromSeq < 0) {
       logger.debug("ws replay ignored: fromSeq missing or invalid");
@@ -581,44 +526,45 @@ export class IntentsGateway
 
     if (client.readyState !== WebSocket.OPEN) return;
 
-    const oldest = this.ringBuffer.oldestSeq();
+    const result = await this.replayStore.since(fromSeq);
 
-    if (oldest !== -1 && fromSeq < oldest - 1) {
-      client.send(
-        JSON.stringify({
-          type: "replay_too_old",
-          fromSeq,
-          oldestAvailableSeq: oldest,
-        }),
-      );
+    if (result.tooOld) {
+      const oldest = await this.replayStore.oldestSeq();
+      client.send(JSON.stringify({ type: "replay_too_old", fromSeq, oldestAvailableSeq: oldest }));
       logger.debug(`ws replay_too_old: fromSeq=${fromSeq} oldestAvailable=${oldest}`);
       return;
     }
 
-    const events = this.ringBuffer.since(fromSeq);
+    const events = result.events;
 
-    client.send(
-      JSON.stringify({
-        type: "replay_start",
-        fromSeq,
-        count: events.length,
-      }),
-    );
+    client.send(JSON.stringify({ type: "replay_start", fromSeq, count: events.length }));
 
+    const filter = this.subscribers.get(client);
     for (const event of events) {
       if (client.readyState !== WebSocket.OPEN) break;
+      // Apply server-side filter (same logic as deliverToMatchingSubscribers but for one client)
+      if (filter) {
+        if (!filter.wantAll) {
+          if (filter.solver !== null) {
+            const solverPredicate = filter.solver;
+            const inlinedIntent = (event as { intent?: unknown }).intent;
+            if (event.type === "intent_created" && inlinedIntent && typeof inlinedIntent === "object") {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              if (!solverPredicate.matches(inlinedIntent as any)) continue;
+            }
+            // state-transition events pass through
+          } else if (filter.chains !== null) {
+            const chain = this.getEventChainSync(event);
+            if (chain !== null && !filter.chains.has(chain)) continue;
+          }
+        }
+      }
       client.send(JSON.stringify(event));
     }
 
     if (client.readyState === WebSocket.OPEN) {
-      client.send(
-        JSON.stringify({
-          type: "replay_end",
-          count: events.length,
-        }),
-      );
+      client.send(JSON.stringify({ type: "replay_end", count: events.length }));
     }
-
     logger.debug(`ws replay complete: fromSeq=${fromSeq} count=${events.length}`);
   }
 
@@ -779,8 +725,8 @@ export class IntentsGateway
     // eligible-intents call sees fresh state.
     this.updateIndexForEvent(event);
 
-    // Push into replay buffer before sending.
-    this.ringBuffer.push(sequencedEvent);
+    // Push into replay store before sending.
+    await this.replayStore.append(sequencedEvent);
 
     logger.debug(`ws broadcast type=${event.type} seq=${seq} subscribers=${this.subscribers.size}`);
 

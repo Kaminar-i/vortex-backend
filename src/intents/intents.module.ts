@@ -16,6 +16,9 @@ import { SorobanModule } from "../soroban/soroban.module";
 import { AppConfig } from "../config/configuration";
 import { PrismaService } from "../prisma/prisma.service";
 import { GovernanceModule } from "../governance/governance.module";
+import { REPLAY_STORE } from "./backplane/replay-store.token";
+import { MemoryReplayStore } from "./backplane/memory-replay.store";
+import { RedisReplayStore } from "./backplane/redis-replay.store";
 
 @Module({
   // Both SolversModule and SorobanModule import IntentsModule back, so both
@@ -54,7 +57,26 @@ import { GovernanceModule } from "../governance/governance.module";
     IntentsMaintenanceJobs,
     // Note: EventIngestionService is provided by SorobanModule (imported above)
     // and exported from there — no re-declaration needed here.
+    {
+      provide: REPLAY_STORE,
+      useFactory: () => {
+        const store = (process.env.WS_REPLAY_STORE ?? 'memory').toLowerCase();
+        const maxCount = parseInt(process.env.WS_REPLAY_MAX_COUNT ?? '500', 10);
+        const maxAgeMs = process.env.WS_REPLAY_MAX_AGE_MS
+          ? parseInt(process.env.WS_REPLAY_MAX_AGE_MS, 10)
+          : undefined;
+        if (store === 'redis') {
+          return new RedisReplayStore({
+            redisUrl: process.env.REDIS_URL ?? 'redis://localhost:6379',
+            streamKey: 'vortex:intents:replay',
+            maxCount,
+            maxAgeMs,
+          });
+        }
+        return new MemoryReplayStore({ maxCount, maxAgeMs });
+      },
+    },
   ],
-  exports: [IntentsService, IntentsGateway, IntentCapabilityIndex],
+  exports: [IntentsService, IntentsGateway, IntentCapabilityIndex, REPLAY_STORE],
 })
 export class IntentsModule {}

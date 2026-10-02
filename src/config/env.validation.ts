@@ -76,6 +76,11 @@ export const envValidationSchema = Joi.object({
   WS_BACKPLANE: Joi.string().valid("memory", "redis").default("memory"),
   REDIS_URL: Joi.string().uri({ scheme: ["redis", "rediss"] }).default("redis://localhost:6379"),
 
+  // ── WebSocket replay store (issue #457) ──────────────────────────────────────
+  WS_REPLAY_STORE: Joi.string().valid("memory", "redis").default("memory"),
+  WS_REPLAY_MAX_COUNT: Joi.number().integer().min(1).default(500),
+  WS_REPLAY_MAX_AGE_MS: Joi.number().integer().min(1).optional(),
+
   // ── Persistence adapter selection ─────────────────────────────────────────
   // Controls which repository adapter is used for intents and solvers.
   // "memory" (default) keeps everything in-process — no database required.
