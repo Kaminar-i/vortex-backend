@@ -7,6 +7,11 @@
 
 // ─── Chains ──────────────────────────────────────────────────────────────────
 
+ * Single source of truth for every chain the protocol recognises.
+ * `SupportedChain` is derived from this tuple so all three consumers
+ * (intents.types.ts, create-intent.dto.ts, tokens.data.ts) stay in sync
+ * automatically — see issue #128.
+ */
 export const SUPPORTED_CHAINS = [
   "stellar",
   "ethereum",
@@ -21,6 +26,42 @@ export type SupportedChain = (typeof SUPPORTED_CHAINS)[number];
 
 // ─── Intent states ────────────────────────────────────────────────────────────
 
+/**
+ * The Stellar chain identifier, named for readability at call sites that would
+ * otherwise repeat the literal.
+ *
+ * Distinct from the Soroban *network* ("testnet" / "mainnet" /
+ * "futurenet"), which selects an RPC endpoint. Kill-switch scopes and intent
+ * records are addressed by chain, not by network, so anything matching against
+ * a chain must use this value.
+ */
+export const STELLAR_CHAIN = "stellar" satisfies SupportedChain;
+
+/**
+ * A single entry in the append-only audit log for an intent.
+ * Every state transition — cancel, expire, accept, fill — appends one entry.
+ * Once persistence lands (issue #36) this will be written to an `intent_audit_log`
+ * table; for now it lives in-memory alongside the intent map.
+ */
+export interface IntentAuditEntry {
+  /** ISO-8601 UTC timestamp of the transition. */
+  timestamp: string;
+  /** State the intent moved INTO. */
+  toState: IntentState;
+  /** Actor who triggered the transition: a user address, solver address, or "system". */
+  actor: string;
+  /** Human-readable explanation, e.g. "user cancelled", "deadline passed". */
+  reason: string;
+  /** Optional extra data (fill amount, tx hash, …). */
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Single source of truth for every state an intent can be in.
+ * `IntentState` is derived from this tuple so DTO validators (`@IsIn`),
+ * Swagger `enum:` annotations, and type-checking all stay in sync
+ * automatically — mirrors how `SUPPORTED_CHAINS` is defined above (issue #270).
+ */
 export const INTENT_STATES = [
   "open",
   "accepted",
@@ -42,6 +83,7 @@ export interface TokenInfo {
   chain: SupportedChain;
   logoURI?: string;
   priceUSD?: number | null;
+  priceUSD?: number;
 }
 
 export interface StellarToken {
@@ -78,6 +120,9 @@ export interface SrcVerificationResult {
  * They are intentionally optional so the expand/contract migration can land
  * without breaking the in-memory or dual-write adapters.
  */
+  priceUSD?: number;
+}
+
 export interface Intent {
   intentId: string;
   user: string;
@@ -88,6 +133,10 @@ export interface Intent {
   minDstAmount: string;
   quotedDstAmount?: string;
   acceptedDstAmount?: string;
+  srcAmount: string; // bigint as string
+  dstToken: StellarToken;
+  minDstAmount: string;
+  quotedDstAmount?: string; // best quote from solvers
   solver?: string;
   state: IntentState;
   createdAt: number;
@@ -128,4 +177,42 @@ export interface IntentAuditEntry {
   actor: string;
   reason: string;
   metadata?: Record<string, unknown>;
+  feeAmount?: string; // realized protocol fee in dst token base units
+  txHash?: string; // fill tx on Stellar
+  slashedAt?: number;
+  slashReason?: string;
+  /**
+   * Snapshot of the governance-controlled protocol parameters that were active
+   * when this intent was created.  Used to evaluate fee/window terms for
+   * in-flight intents even after a governance update changes the live values.
+   * Absent on intents created before issue #500 was deployed.
+   */
+  paramsVersion?: number;
+}
+
+export interface Quote {
+  intentId: string;
+  solver: string;
+  dstAmount: string;
+  fee: string; // protocol fee in dst token
+  fillTime: number; // estimated seconds
+  expiresAt: number;
+}
+
+export interface RouteStep {
+  type: "bridge" | "swap" | "transfer";
+  protocol: string;
+  fromChain: string;
+  toChain: string;
+  fromToken: TokenInfo;
+  toToken: TokenInfo;
+  estimatedTime: number;
+  estimatedGas: string;
+}
+
+export interface Route {
+  steps: RouteStep[];
+  totalTime: number; // seconds
+  totalFeesUSD: number;
+  priceImpact: number;
 }

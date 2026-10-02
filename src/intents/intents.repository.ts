@@ -2,7 +2,6 @@ import { Injectable } from "@nestjs/common";
 import { v4 as uuidv4 } from "uuid";
 import { Intent, IntentState } from "./intents.types";
 import { buildSeedIntents } from "./intents.seed";
-import { intentExposureUsdMicros } from "./intent-exposure";
 
 /**
  * NestJS injection token for the intents repository.
@@ -79,6 +78,19 @@ export interface IIntentsRepository {
   /**
    * Apply a partial patch.  Returns VersionConflict on stale write, null when
    * the intent is not found.
+   * Atomically replace an open intent's minimum output and deadline while its
+   * current deadline is still in the future. Returns null when the intent is
+   * missing, no longer open, or already expired.
+   */
+  amendIfOpen(
+    id: string,
+    patch: Pick<Intent, "minDstAmount" | "deadline">,
+    now?: number,
+  ): Intent | null | Promise<Intent | null>;
+
+  /**
+   * Remove a stored intent. Used only for in-memory retention sweeps for stale
+   * terminal-state records; Prisma-backed stores ignore this call by design.
    */
   update(
     id: string,
@@ -107,6 +119,18 @@ export interface IIntentsRepository {
     maxExposureUsdMicros: bigint,
   ): Promise<{ intent: Intent | null; exposureExceeded: boolean }> | { intent: Intent | null; exposureExceeded: boolean };
 
+  /**
+   * Atomically transition an intent from `accepted` → `filled` only if it is
+   * currently accepted by the specified solver AND the fill window has not
+   * elapsed. Mirrors the DB pattern:
+   *   UPDATE intents SET state='filled', ...patch
+   *   WHERE intent_id=$1 AND state='accepted' AND solver=$2 AND deadline > $3
+   *   RETURNING *
+   * Returns the updated intent on success, `null` on any guard failure.
+   * The `minDstAmount` invariant (fill >= minDst) is enforced by the
+   * controller/service layer with bigint comparison before this write; the
+   * state+deadline predicates here make the write itself race-free.
+   */
   fillIfAccepted(
     id: string,
     solver: string,
@@ -222,6 +246,20 @@ export class InMemoryIntentsRepository implements IIntentsRepository {
       return new VersionConflict(id, expectedVersion, existing.version);
     }
     const updated: Intent = { ...existing, ...patch, version: existing.version + 1 };
+    this.store.set(id, updated);
+    return updated;
+  }
+
+  amendIfOpen(
+    id: string,
+    patch: Pick<Intent, "minDstAmount" | "deadline">,
+    now = Math.floor(Date.now() / 1000),
+  ): Intent | null {
+    const existing = this.store.get(id);
+    if (!existing || existing.state !== "open" || existing.deadline <= now || patch.deadline <= now) {
+      return null;
+    }
+    const updated: Intent = { ...existing, ...patch };
     this.store.set(id, updated);
     return updated;
   }
