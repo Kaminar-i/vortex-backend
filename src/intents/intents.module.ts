@@ -3,6 +3,7 @@ import { ConfigService } from "@nestjs/config";
 import { IntentsService } from "./intents.service";
 import { IntentsController } from "./intents.controller";
 import { IntentsGateway } from "./intents.gateway";
+import { WsDocsController } from "./ws-docs.controller";
 import { IntentsSweeperService } from "./intents-sweeper.service";
 import { IntentsMaintenanceJobs } from "./intents-maintenance.jobs";
 import { INTENTS_REPOSITORY, InMemoryIntentsRepository } from "./intents.repository";
@@ -30,7 +31,7 @@ import { GovernanceModule } from "../governance/governance.module";
     forwardRef(() => SorobanModule),
     GovernanceModule,
   ],
-  controllers: [IntentsController],
+  controllers: [IntentsController, WsDocsController],
   providers: [
     // Select the persistence adapter based on INTENTS_PERSISTENCE env var.
     // INTENTS_PERSISTENCE=prisma  → PrismaIntentsRepository (production/staging)

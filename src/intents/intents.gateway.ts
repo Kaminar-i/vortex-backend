@@ -1,4 +1,4 @@
-import { OnModuleDestroy, Optional } from "@nestjs/common";
+﻿import { OnModuleDestroy, Optional } from "@nestjs/common";
 import { OnGatewayConnection, OnGatewayDisconnect, WebSocketGateway } from "@nestjs/websockets";
 import { WebSocket } from "ws";
 import { IntentsService } from "./intents.service";
@@ -12,6 +12,12 @@ import {
   WS_MAX_FILTER_CHAINS,
   WS_MAX_SUBSCRIPTIONS_PER_CONNECTION,
 } from "../config/limits.config";
+import {
+  negotiateProtocol,
+  resolveProtocol,
+  WS_CLOSE_UNSUPPORTED_PROTOCOL,
+  WS_CLOSE_REASON_UNSUPPORTED,
+} from "./ws-protocol";
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
@@ -114,7 +120,22 @@ export class EventRingBuffer {
  * Solver bots submit intents and accept/fill them through the authenticated
  * REST API. The WS gateway never accepts writes.
  */
-@WebSocketGateway({ path: "/ws" })
+@WebSocketGateway({
+  path: "/ws",
+  /**
+   * Protocol negotiation (issue #456).
+   *
+   * handleProtocols is called by the ws library during the HTTP upgrade
+   * handshake.  We always return a string (never false) so the upgrade
+   * succeeds and handleConnection can close with code 1002 for unknown
+   * versions — giving the client a descriptive WS reason string.
+   *
+   * - vortex.v1 offered   → echo "vortex.v1"
+   * - no protocol offered → echo "vortex.v1" (backward-compatible default)
+   * - unknown protocol    → echo "" (empty); handleConnection closes 1002
+   */
+  handleProtocols: negotiateProtocol,
+})
 export class IntentsGateway
   implements OnGatewayConnection, OnGatewayDisconnect, OnModuleDestroy
 {
@@ -310,6 +331,23 @@ export class IntentsGateway
   }
 
   handleConnection(client: WebSocket) {
+    // ── Protocol version check (issue #456) ────────────────────────────────
+    // `client.protocol` is the negotiated subprotocol string from the HTTP
+    // upgrade handshake.  Empty string means the client sent no
+    // Sec-WebSocket-Protocol header — we default to vortex.v1.
+    // Any other value that is not vortex.v1 is rejected with close code 1002.
+    const protocolResult = resolveProtocol(
+      (client as unknown as { protocol?: string }).protocol ?? "",
+    );
+    if (!protocolResult.accepted) {
+      logger.warn(
+        `ws rejected unknown protocol="${(client as unknown as { protocol?: string }).protocol}" — closing 1002`,
+      );
+      client.close(WS_CLOSE_UNSUPPORTED_PROTOCOL, WS_CLOSE_REASON_UNSUPPORTED);
+      return;
+    }
+    const negotiatedVersion = protocolResult.version;
+
     this.subscribers.set(client, {
       chains: null,
       solver: null,
@@ -340,6 +378,7 @@ export class IntentsGateway
       JSON.stringify({
         type: "connected",
         message: "Vortex intent stream",
+        version: negotiatedVersion,
         seq: currentSeq,
       }),
     );
