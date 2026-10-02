@@ -17,6 +17,12 @@ import { IntentsSweeperService } from "./intents/intents-sweeper.service";
 import { BODY_SIZE_LIMIT, JSON_MAX_DEPTH } from "./config/limits.config";
 import { JobsService } from "./jobs/jobs.service";
 import { adminAuthMiddleware } from "./admin/admin.guard";
+import {
+  API_VERSIONS,
+  createApiDeprecationHeadersMiddleware,
+  enableApiVersioning,
+  openApiDocumentForVersion,
+} from "./common/api-versioning";
 
 // Initialise Sentry before the NestJS app boots so that any startup errors
 // are also captured.  No-op when SENTRY_DSN is not set.
@@ -66,6 +72,7 @@ function checkContractIdEnvVars(
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  enableApiVersioning(app);
 
   // Issue #20 — trust the first proxy hop so Helmet/HSTS sees the real
   // forwarded protocol when TLS terminates upstream behind nginx/ALB.
@@ -116,21 +123,42 @@ async function bootstrap() {
 
     next();
   });
+  app.use(createApiDeprecationHeadersMiddleware());
 
   // Issue #43 / #302 — verify the security headers we rely on in production.
   // HSTS is explicitly configured so it is not silently skipped when a TLS
   // terminator sits in front of Express and `req.secure` is false unless the
   // proxy chain is trusted.
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    const isDocsRoute =
+      req.path === "/docs" ||
+      req.path === "/docs-json" ||
+      req.path.startsWith("/docs/");
+
+    if (isDocsRoute) {
+      res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+      res.setHeader("Pragma", "no-cache");
+      res.setHeader("Expires", "0");
+    }
+
+    next();
+  });
+
   app.use(
     helmet({
       contentSecurityPolicy: {
+        useDefaults: true,
         directives: {
           defaultSrc: ["'self'"],
-          // Swagger UI bundles need inline scripts and CDN resources
+          baseUri: ["'self'"],
+          connectSrc: ["'self'"],
+          fontSrc: ["'self'"],
+          frameAncestors: ["'none'"],
+          imgSrc: ["'self'", "data:", "cdn.jsdelivr.net"],
+          objectSrc: ["'none'"],
+          // Swagger UI bundles need inline scripts and CDN resources.
           scriptSrc: ["'self'", "'unsafe-inline'", "cdn.jsdelivr.net"],
           styleSrc: ["'self'", "'unsafe-inline'", "cdn.jsdelivr.net"],
-          imgSrc: ["'self'", "data:", "cdn.jsdelivr.net"],
-          connectSrc: ["'self'"],
         },
       },
       hsts: {
@@ -138,7 +166,10 @@ async function bootstrap() {
         includeSubDomains: true,
         preload: true,
       },
-      // Swagger UI uses inline event handlers; this policy would block it
+      frameguard: { action: "deny" },
+      noSniff: true,
+      referrerPolicy: { policy: "strict-origin-when-cross-origin" },
+      // Swagger UI uses inline event handlers; this policy would block it.
       crossOriginEmbedderPolicy: false,
     }),
   );
@@ -153,8 +184,20 @@ async function bootstrap() {
     .setDescription("Intent relay API + WebSocket feed for Vortex Protocol")
     .setVersion("0.1.0")
     .build();
-  const swaggerDocument = SwaggerModule.createDocument(app, swaggerConfig);
-  SwaggerModule.setup("docs", app, swaggerDocument);
+  const allVersionsDocument = SwaggerModule.createDocument(app, swaggerConfig);
+  const swaggerDocuments = Object.fromEntries(
+    API_VERSIONS.map((version) => [version, openApiDocumentForVersion(allVersionsDocument, version)]),
+  );
+
+  const shouldServeSwagger = process.env.NODE_ENV !== "production";
+  if (shouldServeSwagger) {
+    SwaggerModule.setup("docs", app, swaggerDocuments["1"]);
+    for (const version of API_VERSIONS) {
+      SwaggerModule.setup(`docs/v${version}`, app, swaggerDocuments[version], {
+        jsonDocumentUrl: `docs/v${version}-json`,
+      });
+    }
+  }
 
   const configService = app.get(ConfigService<AppConfig, true>);
 

@@ -121,6 +121,26 @@ Solvers must maintain a collateral bond in the Soroban `SolverRegistryContract` 
 - **Minimum Bond Requirement**: Solvers cannot accept high-value intents without adequate active collateral.
 - **On-Chain Settlement**: Bond balances are recorded on-chain via the Soroban contract and synchronized with the backend registry.
 
+### Bond and Exposure Checks on Acceptance
+Every accept request verifies the solver's bond amount and active status against
+the registry contract through a read-only Soroban simulation. A successful
+result is cached for at most 30 seconds and registry bond/activity events
+invalidate the cache. If the registry RPC, contract, or response is unavailable,
+the API fails closed with `503`; the projected `bondAmount` in the backend
+solver record is not used as a substitute.
+
+The backend values the intent's source amount in USD using integer arithmetic
+and enforces this ceiling before the state transition:
+
+> accepted exposure in USD + new intent value in USD ≤ on-chain bond value in USD × `maxExposureRatio`
+
+`maxExposureRatio` is the current governance parameter. Stellar bond amounts are
+interpreted in 7-decimal XLM base units and valued using the configured XLM USD
+price. An intent price snapshot older than five minutes, a missing/non-positive
+price, or malformed amount fails closed with `503`. An intent exceeding the
+remaining capacity is rejected with `403` and error code `INSUFFICIENT_BOND`.
+Bond top-ups remain an on-chain operation and are outside this API flow.
+
 ### Reputation & Bond Reconciliation
 A solver's active reputation score is continuously computed using completion rates and account age:
 $$\text{ReputationScore} = \text{SuccessRate} \times e^{-\frac{\text{AgeInDays}}{180}}$$
@@ -152,6 +172,38 @@ Upon subscription, the WebSocket server responds with a `subscribed` event:
 }
 ```
 Subsequent `intent_created` events will only be broadcast to the bot if the intent's `srcChain` matches one of the subscribed chains.
+
+### RFQ Quote Requests
+Authenticated, active solvers with a positive bond and matching source-chain/token capabilities may receive a short-lived `rfq_request` over this WebSocket. The default response window is 300 ms and can be configured from 1 to 1,000 ms with `QUOTE_AUCTION_WINDOW_MS`.
+
+```json
+{
+  "type": "rfq_request",
+  "requestId": "550e8400-e29b-41d4-a716-446655440000",
+  "srcChain": "ethereum",
+  "srcTokenSymbol": "USDC",
+  "srcAmount": "1000000",
+  "dstTokenSymbol": "USDC",
+  "deadline": 1775836800300
+}
+```
+
+Reply before `deadline` with the gross destination amount, solver fee, expiry in Unix seconds, and a Stellar Ed25519 signature:
+
+```json
+{
+  "type": "rfq_response",
+  "requestId": "550e8400-e29b-41d4-a716-446655440000",
+  "dstAmount": "998500",
+  "fee": "100",
+  "expiresAt": 1775836860,
+  "signature": "base64EncodedSignatureString=="
+}
+```
+
+Sign the UTF-8 bytes of `vortex:rfq:v1:<requestId>:<payloadHash>`. `payloadHash` is the lowercase SHA-256 hex digest of the JSON encoding of the request fields (`requestId`, `srcChain`, `srcTokenSymbol`, `srcAmount`, `dstTokenSymbol`, optional `srcTokenAddress` and `dstTokenContract`, and `deadline`) plus `solver`, `dstAmount`, `fee`, and `expiresAt`. Omit absent optional fields and sort keys lexicographically before `JSON.stringify`. The signature is Base64-encoded. The backend accepts one valid response per solver and request; late, expired, malformed, or invalidly signed responses are ignored.
+
+Quotes are ranked by destination amount after solver and protocol fees, with reputation breaking ties. If no valid solver response arrives within the window, the API returns the existing model-based estimate with `indicative: true`; otherwise `indicative` is false.
 
 ### Event Replay & Reconnection
 On connection or reconnection, the bot can request event replay from its last received sequence ID (`seq`) to avoid missing intents during network blips:
@@ -190,11 +242,23 @@ This transitions the intent state from `open` to `accepted` and assigns the solv
 {
   "solver": "GBCW6A5K76DMT5Y55LVTG62W4VRV5L45I2N374X63P3V...",
   "fillAmount": "1000000",
-  "txHash": "0xabc123...",
+  "txHash": "64-character Stellar transaction hash",
   "signature": "base64EncodedSignatureOverFillMessage=="
 }
 ```
-This transitions the intent state to `filled`.
+The backend checks the transaction through Horizon before it transitions the intent to `filled`.
+The transaction must be successful, carry a text memo equal to the intent UUID, and contain
+a matching payment to the intent's Stellar user in the configured destination asset. Path
+payments are credited using `destination_amount`; the submitted `fillAmount` is not used as
+the protocol credit amount. Transactions not indexed yet remain pending and the solver may
+retry the same hash. The hash is reserved to one intent by a database unique index.
+
+**Current verification boundary:** classic Horizon `payment` and strict-send/strict-receive
+path-payment operations are supported. Soroban `invoke_host_function` transfer events are
+not yet verified, so SAC transfers submitted through contract invocation are rejected as
+having no matching payment.
+The current solver lifecycle still uses `isActive`; probation, bond verification, automatic
+promotion/suspension, and SLA digests are not implemented by this change.
 
 ---
 

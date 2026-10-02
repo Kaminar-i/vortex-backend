@@ -68,6 +68,9 @@ const IDEMPOTENCY_TTL_SECONDS = 86_400; // 24 hours
  */
 export const MAX_OPEN_INTENTS_PER_USER = 50;
 
+/** Payload for creating a new intent. */
+export type NewIntentData = Omit<Intent, "intentId" | "createdAt" | "state">;
+
 /**
  * Orchestration layer for intents.
  *
@@ -228,6 +231,56 @@ export class IntentsService {
 
     this.idempotencyInFlight.set(idempotencyKey, creation);
     return creation;
+  }
+
+  /**
+   * Issue #429 — Atomically create up to N intents (all-or-nothing).
+   * If any intent fails validation or user open-intent limits, NO intents are created
+   * and per-item validation errors are returned.
+   */
+  async createBatch(
+    items: NewIntentData[],
+  ): Promise<{ created: Intent[]; errors: { index: number; field?: string; message: string }[] }> {
+    const errors: { index: number; field?: string; message: string }[] = [];
+    const userOpenCounts = new Map<string, number>();
+
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      const user = item.user?.toLowerCase();
+
+      if (!user) {
+        errors.push({ index: i, field: "user", message: "User address is required" });
+        continue;
+      }
+
+      if (!userOpenCounts.has(user)) {
+        const standingCount = await this.countOpenByUser(item.user);
+        userOpenCounts.set(user, standingCount);
+      }
+
+      const currentCount = userOpenCounts.get(user)!;
+      if (currentCount + 1 > MAX_OPEN_INTENTS_PER_USER) {
+        errors.push({
+          index: i,
+          field: "user",
+          message: `Open-intent cap reached — max ${MAX_OPEN_INTENTS_PER_USER} open/accepted intents per user`,
+        });
+      } else {
+        userOpenCounts.set(user, currentCount + 1);
+      }
+    }
+
+    if (errors.length > 0) {
+      return { created: [], errors };
+    }
+
+    const created: Intent[] = [];
+    for (const item of items) {
+      const intent = await this.persistNewIntent(item);
+      created.push(intent);
+    }
+
+    return { created, errors: [] };
   }
 
   /**
@@ -493,6 +546,15 @@ export class IntentsService {
       );
     }
     return this.repo.update(id, patch);
+  }
+
+  /** Amend an open intent without changing its ID or creation history. */
+  async amendIfOpen(
+    id: string,
+    patch: Pick<Intent, "minDstAmount" | "deadline">,
+    now = Math.floor(Date.now() / 1000),
+  ): Promise<Intent | null> {
+    return this.repo.amendIfOpen(id, patch, now);
   }
 
   /**

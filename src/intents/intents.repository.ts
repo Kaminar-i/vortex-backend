@@ -56,6 +56,17 @@ export interface IIntentsRepository {
   update(id: string, patch: Partial<Intent>): Intent | null | Promise<Intent | null>;
 
   /**
+   * Atomically replace an open intent's minimum output and deadline while its
+   * current deadline is still in the future. Returns null when the intent is
+   * missing, no longer open, or already expired.
+   */
+  amendIfOpen(
+    id: string,
+    patch: Pick<Intent, "minDstAmount" | "deadline">,
+    now?: number,
+  ): Intent | null | Promise<Intent | null>;
+
+  /**
    * Remove a stored intent. Used only for in-memory retention sweeps for stale
    * terminal-state records; Prisma-backed stores ignore this call by design.
    */
@@ -191,6 +202,20 @@ export class InMemoryIntentsRepository implements IIntentsRepository {
   update(id: string, patch: Partial<Intent>): Intent | null {
     const existing = this.store.get(id);
     if (!existing) return null;
+    const updated: Intent = { ...existing, ...patch };
+    this.store.set(id, updated);
+    return updated;
+  }
+
+  amendIfOpen(
+    id: string,
+    patch: Pick<Intent, "minDstAmount" | "deadline">,
+    now = Math.floor(Date.now() / 1000),
+  ): Intent | null {
+    const existing = this.store.get(id);
+    if (!existing || existing.state !== "open" || existing.deadline <= now || patch.deadline <= now) {
+      return null;
+    }
     const updated: Intent = { ...existing, ...patch };
     this.store.set(id, updated);
     return updated;

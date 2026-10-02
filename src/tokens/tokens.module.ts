@@ -23,6 +23,9 @@ import { PrismaTokensRepository } from "./prisma-tokens.repository";
       },
     },
     TokensService,
+    PriceFeedWorker,
+    CoinGeckoPriceFeedProvider,
+    { provide: PRICE_FEED_PROVIDER, useExisting: CoinGeckoPriceFeedProvider },
   ],
   exports: [TokensService],
 })

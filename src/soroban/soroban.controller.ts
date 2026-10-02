@@ -11,7 +11,7 @@ import { SorobanService } from "./soroban.service";
 import { AccountRateLimitGuard } from "./account-rate-limit.guard";
 
 @ApiTags("chain")
-@Controller("api/v1/chain")
+@Controller({ path: "chain", version: "1" })
 export class SorobanController {
   constructor(private readonly sorobanService: SorobanService) {}
 
